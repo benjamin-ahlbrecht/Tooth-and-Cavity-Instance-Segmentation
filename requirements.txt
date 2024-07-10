@@ -1,0 +1,11 @@
+jupyter
+ipython
+ipykernel
+
+torch
+torchvision
+pycocotools
+pandas
+numpy
+matplotlib
+
