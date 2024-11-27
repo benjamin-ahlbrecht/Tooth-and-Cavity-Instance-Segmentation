@@ -1,3 +1,5 @@
+import numpy as np
+import cv2 as cv
 import torch
 import torchvision
 torchvision.disable_beta_transforms_warning()
@@ -8,7 +10,7 @@ from torchvision.datasets import (
 )
 
 from pathlib import Path
-from typing import Union, Tuple
+from typing import Union, Tuple, Optional
 
 
 CATEGORY_ID_TO_NAME = {
@@ -68,11 +70,14 @@ def custom_collate_function(batch, to_cuda: bool = True):
     return (images, targets)
 
 
-def process_output(output, spatial_size: Tuple[int, int]):
+def process_output(output, spatial_size: Optional[Tuple[int, int]] = None):
     # Move to CPU
     for key, val in output.items():
         if isinstance(val, torch.Tensor):
             output[key] = val.cpu()
+
+    if spatial_size is None:
+        spatial_size = output["boxes"].shape[2:]
 
     # Add in the "bbox" key
     bbox = torchvision.datapoints.BoundingBox(
@@ -104,5 +109,5 @@ def process_output(output, spatial_size: Tuple[int, int]):
     return output
     
 
-def process_outputs(outputs, spatial_size: Tuple[int, int]):
-    return [self.process_output(output, spatial_size) for output in outputs]
+def process_outputs(outputs, spatial_size: Optional[Tuple[int, int]] = None):
+    return [process_output(output, spatial_size) for output in outputs]
