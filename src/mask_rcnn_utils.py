@@ -70,30 +70,39 @@ def custom_collate_function(batch, to_cuda: bool = True):
     return (images, targets)
 
 
-def process_output(output, spatial_size: Optional[Tuple[int, int]] = None):
-    # Move to CPU
+def process_output(
+        output,
+        spatial_size: Optional[Tuple[int, int]] = None,
+        iou_threshold: float = 0.5
+    ):
+
+    # Perform Non-Max Suppression to select bounding boxes to keep
+    indices_keep = torchvision.ops.nms(output["boxes"], output["scores"], iou_threshold).cpu()
+
+    # Move to CPU and remove unnecessary boxes
     for key, val in output.items():
         if isinstance(val, torch.Tensor):
             output[key] = val.cpu()
+
+    output["boxes"] = output["boxes"][indices_keep]
+    output["labels"] = output["labels"][indices_keep]
+    output["scores"] = output["scores"][indices_keep]
+    output["masks"] = output["masks"][indices_keep]
 
     if spatial_size is None:
         spatial_size = output["boxes"].shape[2:]
 
     # Add in the "bbox" key
-    bbox = torchvision.datapoints.BoundingBox(
-        output["boxes"],
-        format="XYXY",
-        spatial_size=spatial_size
-    )
+    bbox = torchvision.datapoints.BoundingBox(output["boxes"], format="XYXY", spatial_size=spatial_size)
     output["bbox"] = v2.ConvertBoundingBoxFormat("XYWH")(bbox)
 
     # We can remove the 2nd dimension of our masks.
     output["masks"] = output["masks"].squeeze(1)
+    output["masks"] = np.round(np.array(output["masks"])).astype(np.uint8)
     
     # Extract segmentation information from our masks
     output["segmentation"] = []
     for mask in output["masks"]:
-        mask = np.ceil(np.array(mask)).astype(np.uint8)
         contours, hierarchy = cv.findContours(
             mask,
             mode=cv.RETR_EXTERNAL,
@@ -109,5 +118,9 @@ def process_output(output, spatial_size: Optional[Tuple[int, int]] = None):
     return output
     
 
-def process_outputs(outputs, spatial_size: Optional[Tuple[int, int]] = None):
-    return [process_output(output, spatial_size) for output in outputs]
+def process_outputs(
+        outputs,
+        spatial_size: Optional[Tuple[int, int]] = None,
+        iou_threshold: float = 0.5
+    ):
+    return [process_output(output, spatial_size, iou_threshold) for output in outputs]
