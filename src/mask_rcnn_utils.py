@@ -62,7 +62,6 @@ def custom_collate_function(batch, to_cuda: bool = True):
 
     images = torch.stack(images).cuda()
     for target in targets:
-        pass
         target["boxes"] = target["boxes"].cuda()
         target["bbox"] = torch.Tensor(target["bbox"]).cuda()
         target["labels"] = torch.Tensor(target["labels"]).cuda()
