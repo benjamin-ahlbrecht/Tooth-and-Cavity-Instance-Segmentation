@@ -72,10 +72,17 @@ def custom_collate_function(batch, to_cuda: bool = True):
 def process_output(
         output,
         spatial_size: Optional[Tuple[int, int]] = None,
-        iou_threshold: float = 0.5
+        iou_threshold: float = 0.6,
+        score_threshold: float = 0.5
     ):
+    # Filter out low confidence bounding boxes: `score < score_threshold`
+    indices_keep_scores = (output["scores"] >= score_threshold)
+    output["boxes"] = output["boxes"][indices_keep_scores]
+    output["labels"] = output["labels"][indices_keep_scores]
+    output["scores"] = output["scores"][indices_keep_scores]
+    output["masks"] = output["masks"][indices_keep_scores]
 
-    # Perform Non-Max Suppression to select bounding boxes to keep
+    # Perform Non-Max Suppression to help remove duplicate bounding boxes
     indices_keep = torchvision.ops.nms(output["boxes"], output["scores"], iou_threshold).cpu()
 
     # Move to CPU and remove unnecessary boxes
@@ -120,6 +127,10 @@ def process_output(
 def process_outputs(
         outputs,
         spatial_size: Optional[Tuple[int, int]] = None,
-        iou_threshold: float = 0.5
+        iou_threshold: float = 0.6,
+        score_threshold: float = 0.5
     ):
-    return [process_output(output, spatial_size, iou_threshold) for output in outputs]
+    return [
+        process_output(output, spatial_size, iou_threshold, score_threshold)
+        for output in outputs
+    ]
