@@ -136,3 +136,26 @@ def process_outputs(
         process_output(output, spatial_size, iou_threshold, score_threshold)
         for output in outputs
     ]
+
+
+def segmentation_iou_matrix(masks_pred, masks_true):
+    """Compute the IoU matrix between a set of segmentation masks.
+    
+    Parameters:
+        masks_pred (torch.Tensor[bool]): The predicted segmentation masks.
+        masks_true (torch.Tensor[bool]): The ground truth segmentation masks.
+    
+    Returns:
+        iou_matrix (torch.Tensor[float]): The IoU Matrix where `iou_matrix[i, j]`
+            is the IoU between predicted mask `i` and ground truth mask `j`.
+    """
+    iou_matrix = torch.zeros((len(masks_pred), len(masks_true)), dtype=torch.float)
+    print(iou_matrix.shape)
+
+    for i, mask_pred in enumerate(masks_pred):
+        for j, mask_true in enumerate(masks_true):
+            intersection = torch.logical_and(mask_pred, mask_true).sum()
+            union = torch.logical_or(mask_pred, mask_true).sum()
+            iou_matrix[i, j] = intersection / union
+    
+    return iou_matrix
