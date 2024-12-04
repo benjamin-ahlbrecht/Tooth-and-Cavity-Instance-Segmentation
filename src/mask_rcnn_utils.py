@@ -224,6 +224,5 @@ def match_predicted_and_true_masks(
     
     # Remaining unmatched ground truth indices are false negatives
     false_negatives = torch.where(~matched)[0].tolist()
-    print(matched)
 
     return true_positives, false_positives, false_negatives
