@@ -104,11 +104,13 @@ def process_output(
 
     # We can remove the 2nd dimension of our masks.
     output["masks"] = output["masks"].squeeze(1)
-    output["masks"] = np.round(np.array(output["masks"])).astype(np.uint8)
+    output["masks_raw"] = output["masks"]
+    output["masks"] = output["masks"] >= 0.5
     
     # Extract segmentation information from our masks
     output["segmentation"] = []
     for mask in output["masks"]:
+        mask = np.array(mask).astype(np.uint8)
         contours, hierarchy = cv.findContours(
             mask,
             mode=cv.RETR_EXTERNAL,
