@@ -10,7 +10,7 @@ from torchvision.datasets import (
 )
 
 from pathlib import Path
-from typing import Union, Tuple, Optional, Dict
+from typing import Union, Tuple, Optional, Dict, List
 
 
 CATEGORY_ID_TO_NAME = {
@@ -152,7 +152,6 @@ def mask_iou_matrix(masks_pred, masks_true):
     n = len(masks_pred)
     m = len(masks_true)
     iou_matrix = torch.zeros((n, m), dtype=torch.float, device=masks_pred.device)
-    print(iou_matrix.shape)
 
     for i, mask_pred in enumerate(masks_pred):
         for j, mask_true in enumerate(masks_true):
@@ -226,3 +225,32 @@ def match_predicted_and_true_masks(
     false_negatives = torch.where(~matched)[0].tolist()
 
     return true_positives, false_positives, false_negatives
+
+
+def f_score_from_counts(tp: int, fp: int, fn: int, beta: float = 1.0):
+    """Compute the F-Score from raw confusion matrix counts.
+
+    Parameters:
+        tp (int): The number of true positives (TP).
+        fp (int): The number of false positives (FP).
+        fn (int): The number of false negatives (FN).
+        beta (float): A weighting factor such that the recall is considered
+            `beta` times as important as precision 
+    
+    Returns:
+        f_score (float): The computed F-Score.
+    """
+    factor = (1 + beta**2) * tp
+    denominator = beta**2 * fn + fp
+    f_score = factor / (factor + denominator)
+    return f_score
+
+
+def f_score_from_matches(tp: List, fp: List, fn: List, beta: float = 1.0):
+    """For details, see `f_score_from_counts`. Takes in output from
+    `match_predicted_and_true_masks`.
+    """
+    tp = len(tp)
+    fp = len(fp)
+    fn = len(fn)
+    return f_score_from_counts(tp, fp, fn, beta=beta)
