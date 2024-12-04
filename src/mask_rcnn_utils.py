@@ -10,7 +10,7 @@ from torchvision.datasets import (
 )
 
 from pathlib import Path
-from typing import Union, Tuple, Optional
+from typing import Union, Tuple, Optional, Dict
 
 
 CATEGORY_ID_TO_NAME = {
@@ -138,7 +138,7 @@ def process_outputs(
     ]
 
 
-def segmentation_iou_matrix(masks_pred, masks_true):
+def mask_iou_matrix(masks_pred, masks_true):
     """Compute the IoU matrix between a set of segmentation masks.
     
     Parameters:
@@ -149,7 +149,9 @@ def segmentation_iou_matrix(masks_pred, masks_true):
         iou_matrix (torch.Tensor[float]): The IoU Matrix where `iou_matrix[i, j]`
             is the IoU between predicted mask `i` and ground truth mask `j`.
     """
-    iou_matrix = torch.zeros((len(masks_pred), len(masks_true)), dtype=torch.float)
+    n = len(masks_pred)
+    m = len(masks_true)
+    iou_matrix = torch.zeros((n, m), dtype=torch.float, device=masks_pred.device)
     print(iou_matrix.shape)
 
     for i, mask_pred in enumerate(masks_pred):
@@ -159,3 +161,69 @@ def segmentation_iou_matrix(masks_pred, masks_true):
             iou_matrix[i, j] = intersection / union
     
     return iou_matrix
+
+
+def match_predicted_and_true_masks(
+        targets_pred: Dict,
+        targets_true: Dict,
+        iou_threshold: float = 0.5
+    ):
+    """Generate the confusion matrix beween the segmentations and labels of
+    predicted targets and ground truth targets.
+
+    Parameters:
+        targets_pred (Dict[str, torch.Tensor]): The predicted outputs such that...
+            - `targets_pred["masks"]` provide the predicted segmentation masks
+            - `targets_pred["labels"]` provide the predicted labels
+        targets_true (Dict[str, torch.Tensor]): The ground truth outputs. Expected
+            to contain similar outputs as `targets_pred`.
+        iou_threshold (float): The minimum IoU threshold required for a predicted
+            mask to be considered a match (true positive).
+    
+    Returns:
+        true_positives (List[Tuple[int, int, float]]): A list of true positive
+            predictions indices. Each list contains a 3-tuple such that, for a
+            true postive at index `i`, `idx_pred, idx_true, iou = true_positives[i]`.
+        false_positives (List[int]): A list of false positive indices corresponding
+            to the predictions.
+        false_negatives (List[int]): A list of false negative indices corresponding
+            to the ground truth.
+    """
+    masks_pred = targets_pred["masks"]
+    masks_true = targets_true["masks"]
+
+    labels_pred = targets_pred["labels"]
+    labels_true = targets_true["labels"]
+
+    iou_matrix = mask_iou_matrix(masks_pred, masks_true)
+
+    # To avoid double-counting, keep track of which ground-truth indices we've matched
+    matched = torch.zeros(len(masks_true), dtype=torch.bool, device=masks_true.device)
+
+    # Iterate through each prediction label and IoU to see if we have a match (TP)
+    true_positives = []
+    false_positives = []
+    for idx_pred, label_pred in enumerate(labels_pred):
+        # Our goal is to find the ground truth index that maximizes our IoU
+        max_iou = -1
+        best_idx_true = -1
+
+        for idx_true, (iou, label_true) in enumerate(zip(iou_matrix[idx_pred], labels_true)):
+            if not matched[idx_true] and iou >= iou_threshold and label_pred == label_true:
+                if iou > max_iou:
+                    max_iou = iou
+                    best_idx_true = idx_true
+                    matched[idx_true] = True
+        
+        if best_idx_true >= 0:
+            # Match found - TP
+            true_positives.append((idx_pred, best_idx_true, max_iou.item()))
+        else:
+            # No match found - FP
+            false_positives.append(idx_pred)
+    
+    # Remaining unmatched ground truth indices are false negatives
+    false_negatives = torch.where(~matched)[0].tolist()
+    print(matched)
+
+    return true_positives, false_positives, false_negatives
