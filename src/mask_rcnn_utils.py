@@ -9,6 +9,7 @@ from torchvision.datasets import (
     wrap_dataset_for_transforms_v2
 )
 
+from tqdm.cli import tqdm
 from pathlib import Path
 from typing import Union, Tuple, Optional, Dict, List
 
@@ -162,39 +163,20 @@ def mask_iou_matrix(masks_pred, masks_true):
     return iou_matrix
 
 
-def match_predicted_and_true_masks(
-        targets_pred: Dict,
-        targets_true: Dict,
-        iou_threshold: float = 0.5
+def match_predicted_and_true_masks_from_iou_matrix(
+    targets_pred: Dict,
+    targets_true: Dict,
+    iou_matrix,
+    iou_threshold: float = 0.5
     ):
-    """Generate the confusion matrix beween the segmentations and labels of
-    predicted targets and ground truth targets.
-
-    Parameters:
-        targets_pred (Dict[str, torch.Tensor]): The predicted outputs such that...
-            - `targets_pred["masks"]` provide the predicted segmentation masks
-            - `targets_pred["labels"]` provide the predicted labels
-        targets_true (Dict[str, torch.Tensor]): The ground truth outputs. Expected
-            to contain similar outputs as `targets_pred`.
-        iou_threshold (float): The minimum IoU threshold required for a predicted
-            mask to be considered a match (true positive).
-    
-    Returns:
-        true_positives (List[Tuple[int, int, float]]): A list of true positive
-            predictions indices. Each list contains a 3-tuple such that, for a
-            true postive at index `i`, `idx_pred, idx_true, iou = true_positives[i]`.
-        false_positives (List[int]): A list of false positive indices corresponding
-            to the predictions.
-        false_negatives (List[int]): A list of false negative indices corresponding
-            to the ground truth.
+    """Similar to `match_predicted_and_true_masks` except we take in a pre-computed
+    IoU matrix to reduce computation.
     """
     masks_pred = targets_pred["masks"]
     masks_true = targets_true["masks"]
 
     labels_pred = targets_pred["labels"]
     labels_true = targets_true["labels"]
-
-    iou_matrix = mask_iou_matrix(masks_pred, masks_true)
 
     # To avoid double-counting, keep track of which ground-truth indices we've matched
     matched = torch.zeros(len(masks_true), dtype=torch.bool, device=masks_true.device)
@@ -227,6 +209,47 @@ def match_predicted_and_true_masks(
     return true_positives, false_positives, false_negatives
 
 
+def match_predicted_and_true_masks(
+        targets_pred: Dict,
+        targets_true: Dict,
+        iou_threshold: float = 0.5
+    ):
+    """Generate the confusion matrix beween the segmentations and labels of
+    predicted targets and ground truth targets.
+
+    Parameters:
+        targets_pred (Dict[str, torch.Tensor]): The predicted outputs such that...
+            - `targets_pred["masks"]` provide the predicted segmentation masks
+            - `targets_pred["labels"]` provide the predicted labels
+        targets_true (Dict[str, torch.Tensor]): The ground truth outputs. Expected
+            to contain similar outputs as `targets_pred`.
+        iou_threshold (float): The minimum IoU required for a predicted
+            mask to be considered a match (true positive).
+    
+    Returns:
+        true_positives (List[Tuple[int, int, float]]): A list of true positive
+            predictions indices. Each list contains a 3-tuple such that, for a
+            true postive at index `i`, `idx_pred, idx_true, iou = true_positives[i]`.
+        false_positives (List[int]): A list of false positive indices corresponding
+            to the predictions.
+        false_negatives (List[int]): A list of false negative indices corresponding
+            to the ground truth.
+    """
+    masks_pred = targets_pred["masks"]
+    masks_true = targets_true["masks"]
+
+    labels_pred = targets_pred["labels"]
+    labels_true = targets_true["labels"]
+
+    iou_matrix = mask_iou_matrix(masks_pred, masks_true)
+    return match_predicted_and_true_masks_from_iou_matrix(
+        targets_pred,
+        targets_true,
+        iou_matrix,
+        iou_threshold=iou_threshold
+    )
+
+
 def f_score_from_counts(tp: int, fp: int, fn: int, beta: float = 1.0):
     """Compute the F-Score from raw confusion matrix counts.
 
@@ -254,3 +277,97 @@ def f_score_from_matches(tp: List, fp: List, fn: List, beta: float = 1.0):
     fp = len(fp)
     fn = len(fn)
     return f_score_from_counts(tp, fp, fn, beta=beta)
+
+
+def evaluate_instance_segmentation(
+        model: torch.nn.Module,
+        dataloader: torch.utils.data.DataLoader,
+        iou_threshold: float = 0.5
+    ) -> Dict[str, Dict[str, float]]:
+    """ Evaluates instance segmentation model performance.
+
+    Parameters:
+        model (torch.nn.Module): Instance segmentation model.
+        dataloader (torch.utils.data.DataLoader): Test DataLoader.
+        iou_threshold (float): The minimum IoU required for a predicted
+            mask to be considered a match (true positive).
+
+    Returns:
+        metrics (Dict[str, float]): Dictionary containing evaluated metrics
+    """
+    model.eval()
+    tp = 0
+    fp = 0
+    fn = 0
+
+    # Store confidence scores with their TP/FP status for calculating mAP
+    all_scores = []
+    all_matches = []
+
+    pbar = tqdm(enumerate(dataloader), desc="Evaluating", total=len(dataloader))
+    for i, (images, y_trues) in pbar:
+        with torch.no_grad():
+            # Make predictions with the testing set
+            y_preds = model.forward(images)
+            y_preds = process_outputs(y_preds)
+
+            # Compute IoU between the predicted and true segmentation masks
+            iou_matrices = [
+                mask_iou_matrix(y_pred["masks"], y_true["masks"])
+                for y_pred, y_true in zip(y_preds, y_trues)
+            ]
+
+        # Calculate metrics for each image 
+        for y_pred, y_true, iou_matrix in zip(y_preds, y_trues, iou_matrices):
+            tp_idx, fp_idx, fn_idx = match_predicted_and_true_masks_from_iou_matrix(
+                y_pred,
+                y_true,
+                iou_matrix,
+                iou_threshold=iou_threshold
+            )
+
+            # Update global counts
+            tp += len(tp_idx)
+            fp += len(fp_idx)
+            fn += len(fn_idx)
+
+            # Store confidence scores and match status for mAP
+            scores = y_pred["scores"].cpu().numpy()
+            matches = np.zeros(len(scores))
+            matches[[idx[0] for idx in tp_idx]] = 1
+
+            all_scores.extend(scores)
+            all_matches.extend(matches)
+
+            # Calculate metrics to update progress bar
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+            recall = tp / (tp + fn) if (tp + fp) > 0 else 0
+            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+
+            pbar.set_postfix({
+                "Precision": f"{precision:.3f}",
+                "Recall": f"{recall:.3f}",
+                "F1-Score": f"{f1:.3f}"
+            })
+        
+    # Calculate mAP
+    all_scores = np.array(all_scores)
+    all_matches = np.array(all_matches)
+    sort_idx = np.argsort(-all_scores)
+    all_matches = all_matches[sort_idx]
+
+    # Calculate precision at each threshold
+    precisions = np.cumsum(all_matches) / np.arange(1, len(all_matches) + 1)
+    recalls = np.cumsum(all_matches) / (tp + fn)
+
+    # Calculate mAP using all points
+    mAP = np.trapz(precisions, recalls) if len(recalls) > 0 else 0
+
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1_score":  f1,
+        "mAP": mAP,
+        "total_predictions": tp + fp,
+        "total_ground_truth": tp + fn
+    }
