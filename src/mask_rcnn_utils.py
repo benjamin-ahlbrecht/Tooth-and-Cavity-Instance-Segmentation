@@ -283,7 +283,7 @@ def evaluate_instance_segmentation(
         model: torch.nn.Module,
         dataloader: torch.utils.data.DataLoader,
         iou_threshold: float = 0.5
-    ) -> Dict[str, Dict[str, float]]:
+    ) -> Dict[str, float]:
     """ Evaluates instance segmentation model performance.
 
     Parameters:
@@ -295,6 +295,9 @@ def evaluate_instance_segmentation(
     Returns:
         metrics (Dict[str, float]): Dictionary containing evaluated metrics
     """
+    if not (0 <= iou_threshold <= 1):
+        raise ValueError("IoU threshold must be between 0 and 1")
+
     model.eval()
     tp = 0
     fp = 0
@@ -341,7 +344,7 @@ def evaluate_instance_segmentation(
 
             # Calculate metrics to update progress bar
             precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-            recall = tp / (tp + fn) if (tp + fp) > 0 else 0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0
             f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
 
             pbar.set_postfix({
@@ -353,6 +356,8 @@ def evaluate_instance_segmentation(
     # Calculate mAP
     all_scores = np.array(all_scores)
     all_matches = np.array(all_matches)
+
+    # Sort based on confidence scores (descending)
     sort_idx = np.argsort(-all_scores)
     all_matches = all_matches[sort_idx]
 
@@ -371,3 +376,101 @@ def evaluate_instance_segmentation(
         "total_predictions": tp + fp,
         "total_ground_truth": tp + fn
     }
+
+
+def evaluate_instance_segmentation_multiple_thresholds(
+        model: torch.nn.Module,
+        dataloader: torch.utils.data.DataLoader,
+        iou_thresholds: List[float],
+    ) -> List[Dict[str, float]]:
+    if not all(0 <= iou_threshold <= 1 for iou_threshold in iou_thresholds):
+        raise ValueError("All IoU thresholds must be between 0 and 1.")
+
+    model.eval()
+    tp = np.zeros_like(iou_thresholds)
+    fp = np.zeros_like(iou_thresholds)
+    fn = np.zeros_like(iou_thresholds)
+    
+    # Our return dict - each index hold metrics for the IoU threshold at that index
+    metrics = [{"iou_threshold": iou_threshold} for iou_threshold in iou_thresholds]
+
+    all_scores = [[] for _ in range(len(iou_thresholds))]
+    all_matches = [[] for _ in range(len(iou_thresholds))]
+
+    pbar = tqdm(enumerate(dataloader), desc="Evaluating", total=len(dataloader))
+    for i, (images, y_trues) in pbar:
+        with torch.no_grad():
+            # Make predictions with the testing set
+            y_preds = model.forward(images)
+            y_preds = process_outputs(y_preds)
+
+            # Compute IoU between the predicted and true segmentation masks
+            iou_matrices = [
+                mask_iou_matrix(y_pred["masks"], y_true["masks"])
+                for y_pred, y_true in zip(y_preds, y_trues)
+            ]
+
+        for y_pred, y_true, iou_matrix in zip(y_preds, y_trues, iou_matrices):
+            for i, iou_threshold in enumerate(iou_thresholds):
+                # Compute tp, fp, fn for each IoU threshold
+                tp_idx, fp_idx, fn_idx = match_predicted_and_true_masks_from_iou_matrix(
+                    y_pred,
+                    y_true,
+                    iou_matrix
+                )
+
+                # Store this in it's row-index
+                tp[i] += len(tp_idx)
+                fp[i] += len(fp_idx)
+                fn[i] += len(fn_idx)
+
+                # Store confidence scores and matches (Matches = 1 => TP; Matches = 0 => FP)
+                scores = y_pred["scores"].cpu().numpy()
+                matches = np.zeros(len(scores))
+                matches[[idx[0] for idx in tp_idx]] = 1
+
+                all_scores[i].extend(scores)
+                all_matches[i].extend(matches)
+        
+    # Iterate through each IoU threshold and store/compute our metrics
+    for i, iou_threshold in enumerate(iou_thresholds):
+        metrics[i]["tp"] = tp[i]
+        metrics[i]["fp"] = fp[i]
+        metrics[i]["fn"] = fn[i]
+
+        precision = tp[i] / (tp[i] + fp[i]) if (tp[i] + fp[i]) > 0 else 0
+        recall = tp[i] / (tp[i] + fn[i]) if (tp[i] + fn[i]) > 0 else 0
+        f1 = 2 * (precision * recall) / (precision + recall)
+
+        metrics[i]["precision"] = precision
+        metrics[i]["recall"] = recall
+        metrics[i]["f1_score"] = f1
+
+        # Compute our mAP
+        scores = np.array(all_scores[i])
+        matches = np.array(all_matches[i])
+
+        # Sort matches by confidence (descending)
+        sort_idx = np.argsort(-scores)
+        matches = matches[sort_idx]
+
+        precisions = np.cumsum(matches) / np.arange(1, len(matches) + 1)
+        recalls = np.cumsum(matches) / (tp[i] + fn[i])
+        mAP = np.trapz(precisions, recalls) if len(recalls) > 0 else 0
+
+        metrics[i]["mAP"] = mAP
+        metrics[i]["total_predictions"] = tp[i] + fp[i]
+        metrics[i]["total_ground_truth"] = tp[i] + fn[i]
+        metrics[i]["mAP_precisions"] = precisions
+        metrics[i]["mAP_recalls"] = recalls
+        metrics[i]["mAP_scores"] = scores[sort_idx]
+
+    # Now create average metrics as the last index in our list
+    metric_keys = ["precision", "recall", "f1_score", "mAP"]
+    metrics_avg = {"iou_threshold": "average"}
+    for metric_key in metric_keys:
+        metrics_avg[metric_key] = np.mean([metric[metric_key] for metric in metrics])
+    
+    metrics.append(metrics_avg)
+
+    return metrics
